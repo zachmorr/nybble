@@ -1,0 +1,94 @@
+/dts-v1/;
+#include "allwinner/suniv-f1c100s.dtsi"
+
+#include <dt-bindings/gpio/gpio.h>
+
+/ {
+	model = "Nybble";
+	compatible = "allwinner,suniv-f1c100s";
+
+	aliases {
+		mmc0 = &mmc0;
+		serial0 = &uart0;
+		serial2 = &uart2;
+		spi0 = &spi0;
+		pio = &pio;
+	};
+
+	chosen {
+		stdout-path = "serial0:115200n8";
+	};
+
+	reg_vcc3v3: vcc3v3 {
+		compatible = "regulator-fixed";
+		regulator-name = "vcc3v3";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+	};
+	
+	leds {
+		compatible = "gpio-leds";
+		status = "okay";
+
+		led0 {
+			gpios = <&pio 4 4 GPIO_ACTIVE_HIGH>;
+			linux,default-trigger = "heartbeat";
+			default-state = "on";
+		};
+	};
+
+};
+
+&pio {
+	spi0_pd_pins: spi0-pd-pins {
+		pins = "PD20", "PD18", "PD21", "PD19";
+		function = "spi0";
+	};
+
+
+	uart2_pd_pins: uart2-pd-pins {
+		pins = "PD13", "PD14";
+		function = "uart2";
+	};
+};
+
+&mmc0 {
+	broken-cd;
+	bus-width = <4>;
+	disable-wp;
+	status = "okay";
+	vmmc-supply = <&reg_vcc3v3>;
+};
+
+&spi0 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&spi0_pd_pins>;
+	status = "okay";
+};
+
+&otg_sram {
+	status = "okay";
+};
+
+&uart0 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&uart0_pe_pins>;
+	status = "okay";
+};
+
+&uart2 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&uart2_pd_pins>;
+	status = "okay";
+};
+
+&usb_otg {
+	dr_mode = "peripheral";
+	status = "okay";
+};
+
+&usbphy {
+	usb0_id_det-gpios = <&pio 4 2 GPIO_ACTIVE_HIGH>; /* PE2 */
+	status = "okay";
+};
+
