@@ -1,17 +1,29 @@
+include gmsl
+
+
 #########################################################################
 #																		#
 #							GLOBAL VARS									#
 #																		#
 #########################################################################
 .DEFAULT_GOAL:=all
+SHELL=/bin/bash
 PROJECT=$(shell realpath ./)
 CONFIG_DIR=$(PROJECT)/config
 BUILD_DIR=$(PROJECT)/build
 IMAGE_DIR=$(BUILD_DIR)/images
+SYSROOT_DIR=$(BUILD_DIR)/sysroot
+TOOLCHAIN_DIR=$(BUILD_DIR)/toolchain
+ROOTFS_DIR=$(BUILD_DIR)/rootfs
 
 $(IMAGE_DIR):
 	mkdir -pv $(IMAGE_DIR)
 
+$(SYSROOT_DIR):
+	mkdir -pv $(SYSROOT_DIR)
+
+$(TOOLCHAIN_DIR):
+	mkdir -pv $(TOOLCHAIN_DIR)
 
 #########################################################################
 #																		#
@@ -30,8 +42,8 @@ $(BUILDROOT_SRC): | $(BUILDROOT_WORK_DIR)
 $(BUILDROOT_WORK_DIR):
 	mkdir -pv $(BUILDROOT_WORK_DIR)
 
-.PHONY: buildroot-clean
-buildroot-clean:
+.PHONY: bsp-clean
+bsp-clean:
 	rm -rf $(BUILDROOT_WORK_DIR)
 
 
@@ -73,6 +85,8 @@ linux-clean:
 linux-menuconfig:
 	make -C $(BUILDROOT_SRC) linux-menuconfig
 
+.PHONY: all
+all:: linux
 
 ############################# Build U-Boot ###############################
 SPL=$(IMAGE_DIR)/u-boot-sunxi-with-spl.bin
@@ -94,29 +108,49 @@ uboot-clean:
 uboot-menuconfig:
 	make -C $(BUILDROOT_SRC) uboot-menuconfig
 
+.PHONY: all
+all:: uboot
 
 ############################# Build Busybox ##############################
-.PHONY: busybox
-busybox:
-	make -C $(BUILDROOT_SRC) busybox-rebuild 
+# .PHONY: busybox
+# busybox:
+# 	make -C $(BUILDROOT_SRC) busybox-rebuild 
 
-.PHONY: busybox-clean
-busybox-clean:
-	make -C $(BUILDROOT_SRC) busybox-dirclean
+# .PHONY: busybox-clean
+# busybox-clean:
+# 	make -C $(BUILDROOT_SRC) busybox-dirclean
 
-.PHONY: busybox-menuconfig
-busybox-menuconfig:
-	make -C $(BUILDROOT_SRC) busybox-menuconfig
+# .PHONY: busybox-menuconfig
+# busybox-menuconfig:
+# 	make -C $(BUILDROOT_SRC) busybox-menuconfig
 
 
 ############################# Build Image ##################################
 CPIO=$(IMAGE_DIR)/rootfs.cpio.uboot
-SDK=$(IMAGE_DIR)/arm-buildroot-linux-musleabi_sdk-buildroot.tar.gz
+SDK=$(TOOLCHAIN_DIR)/arm-buildroot-linux-musleabi_sdk-buildroot
 
-$(CPIO) $(SDK): $(BUILDROOT_CONFIG) $(BSP)/nybble/overlay/init | $(IMAGE_DIR)
+$(CPIO) $(SDK): $(BUILDROOT_CONFIG) $(BSP)/nybble/overlay/init | $(IMAGE_DIR) $(TOOLCHAIN_DIR)
 	make -C $(BUILDROOT_SRC) sdk
-	cp $(BUILDROOT_IMAGES)/arm-buildroot-linux-musleabi_sdk-buildroot.tar.gz $(BUILDROOT_IMAGES)/rootfs.cpio.uboot $(IMAGE_DIR)
+	cp $(BUILDROOT_IMAGES)/rootfs.cpio.uboot $(IMAGE_DIR)
+	tar -xf $(BUILDROOT_IMAGES)/arm-buildroot-linux-musleabi_sdk-buildroot.tar.gz -C $(TOOLCHAIN_DIR)
 
+.PHONY: sdk
+sdk: $(SDK)
+
+.PHONY: all
+all:: sdk
+
+
+#########################################################################
+#																		#
+#								RootFS									#
+#																		#
+#########################################################################
+SKELETON_DIR= $(CONFIG_DIR)/target/skeleton/
+
+$(ROOTFS_DIR):
+	mkdir -pv $(ROOTFS_DIR)
+	cp -r --preserve=mode,ownership,timestamps $(CONFIG_DIR)/target/skeleton/* $(ROOTFS_DIR)
 
 
 #########################################################################
@@ -124,9 +158,29 @@ $(CPIO) $(SDK): $(BUILDROOT_CONFIG) $(BSP)/nybble/overlay/init | $(IMAGE_DIR)
 #								Packages								#
 #																		#
 #########################################################################
+ENV_SETUP=. $(SDK)/environment-setup
+SDK_MAKE=$(ENV_SETUP) && $(MAKE)
+
+include $(wildcard $(CONFIG_DIR)/target/**/*.mk)
 
 
 
-.PHONY: all
-all: $(ZIMAGE) $(SPL) $(SDK)
 
+#########################################################################
+#																		#
+#								Debugging								#
+#																		#
+#########################################################################
+.PHONY: printvars
+printvars:
+ifndef VARS
+	$(error Please pass a non-empty VARS to 'make printvars')
+endif
+	@:
+	$(foreach V, \
+		$(sort $(foreach X, $(.VARIABLES), $(filter $(VARS),$(X)))), \
+		$(if $(filter-out environment% default automatic, \
+				$(origin $V)), \
+		$(if $(QUOTED_VARS),\
+			$(info $V='$(subst ','\'',$(if $(RAW_VARS),$(value $V),$($V)))'), \
+			$(info $V=$(if $(RAW_VARS),$(value $V),$($V))))))
