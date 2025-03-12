@@ -1,21 +1,52 @@
-#!/bin/sh
+#!/apps/busybox/bin/sh
 
-ROOT="/mnt/root"
-ROOT_DEV="/dev/mmcblk0p2"
+export TERM=xterm
+export PATH=/apps/busybox/bin:/apps/busybox/sbin
 
-# mount temporary filesystems
-mount -n -t devtmpfs devtmpfs /dev
-# mount -n -t proc     proc     /proc
-# mount -n -t sysfs    sysfs    /sys
-# mount -n -t tmpfs    tmpfs    /run
+mount -t proc proc /nybble/processes
+mount -t devtmpfs devtmpfs /nybble/devices
+mount -t sysfs sysfs /nybble/system
+mount -t debugfs debugfs /nybble/debug
 
-# mount new root
-[ -d ${ROOT} ] || mkdir -p ${ROOT}
-mount ${ROOT_DEV} ${ROOT}
+insmod /nybble/lib/modules/6.6.78/kernel/drivers/usb/gadget/libcomposite.ko
+insmod /nybble/lib/modules/6.6.78/kernel/drivers/usb/gadget/function/u_serial.ko 
+insmod /nybble/lib/modules/6.6.78/kernel/drivers/usb/gadget/function/usb_f_acm.ko 
+insmod /nybble/lib/modules/6.6.78/kernel/drivers/usb/gadget/function/usb_f_fs.ko 
 
-# Copy linker & kernel modules
-cp -r /lib/* ${ROOT}/nybble/lib
+configfs=/nybble/config
+mkdir -pv $configfs
 
-# switch to new rootfs and exec init
-cd ${ROOT}
-exec switch_root . "/nybble/boot/init"
+gadget=g1
+mount -t configfs configfs $configfs
+mkdir -v $configfs/usb_gadget/$gadget
+cd $configfs/usb_gadget/$gadget
+
+echo 0xABCD > idVendor
+echo 0x1234 > idProduct
+
+str=strings/0x409
+mkdir $str
+echo "serial" > $str/serialnumber
+echo "zach" > $str/manufacturer
+echo "nybble" > $str/product
+
+conf=configs/usb.1
+mkdir $conf
+mkdir $conf/$str
+echo "usb conf" > $conf/$str/configuration
+echo 120 > $conf/MaxPower
+
+mkdir functions/acm.GS0
+ln -s functions/acm.GS0 $conf
+
+# mkdir functions/ffs.usb
+# ln -s functions/ffs.usb $conf
+
+echo "musb-hdrc.1.auto" > UDC
+
+# cd /nybble/devices 
+# mkdir ffs-usb
+# mount -t functionfs usb /nybble/devices/ffs-usb
+
+cd /
+exec sh
