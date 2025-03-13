@@ -1,6 +1,6 @@
-config BR2_HELLO
-    bool "hello"
+config BR2_USB
+    bool "usb"
     depends on BR2_PACKAGE_HOST_RUSTC_TARGET_ARCH_SUPPORTS
     select BR2_PACKAGE_HOST_RUSTC
     help
-      Hello World
+      USB World

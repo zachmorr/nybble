@@ -1,1 +1,1 @@
-source "$BR2_EXTERNAL_NYBBLE_PATH/packages/hello/Config.in"
+source "$BR2_EXTERNAL_NYBBLE_PATH/packages/usb/Config.in"
