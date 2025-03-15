@@ -3,21 +3,22 @@
 export TERM=xterm
 export PATH=/apps/busybox/bin:/apps/busybox/sbin
 
+configfs=/nybble/config
+mkdir -pv $configfs
+
 mount -t proc proc /nybble/processes
 mount -t devtmpfs devtmpfs /nybble/devices
 mount -t sysfs sysfs /nybble/system
 mount -t debugfs debugfs /nybble/debug
+mount -t configfs configfs $configfs
 
 insmod /nybble/lib/modules/6.6.78/kernel/drivers/usb/gadget/libcomposite.ko
 insmod /nybble/lib/modules/6.6.78/kernel/drivers/usb/gadget/function/u_serial.ko 
 insmod /nybble/lib/modules/6.6.78/kernel/drivers/usb/gadget/function/usb_f_acm.ko 
 insmod /nybble/lib/modules/6.6.78/kernel/drivers/usb/gadget/function/usb_f_fs.ko 
 
-configfs=/nybble/config
-mkdir -pv $configfs
 
 gadget=g1
-mount -t configfs configfs $configfs
 mkdir -v $configfs/usb_gadget/$gadget
 cd $configfs/usb_gadget/$gadget
 
