@@ -1,1 +1,3 @@
 source "$BR2_EXTERNAL_NYBBLE_PATH/packages/usb/Config.in"
+source "$BR2_EXTERNAL_NYBBLE_PATH/packages/init/Config.in"
+source "$BR2_EXTERNAL_NYBBLE_PATH/packages/gadget/Config.in"

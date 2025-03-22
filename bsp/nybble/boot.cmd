@@ -1,4 +1,4 @@
-setenv bootargs console=ttyS0,115200 earlyprintk debug root=/dev/mmcblk0p2 rootwait rw init=/bin/sh devtmpfs.mount=0
+setenv bootargs console=ttyS0,115200 earlyprintk debug root=/dev/mmcblk0p2 rootwait rw init=/nybble/boot/init.sh devtmpfs.mount=0
 fatload mmc 0 ${kernel_addr_r} zImage
 fatload mmc 0 ${fdt_addr_r} linux-nybble.dtb
 bootz ${kernel_addr_r} - ${fdt_addr_r}
