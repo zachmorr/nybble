@@ -1,0 +1,258 @@
+#!/usr/bin/python3
+import usb.core
+from usb.core import Device, Interface, Endpoint
+import usb.util
+import click
+import sys
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from enum import IntEnum
+
+OK = b"\x00\x00\x00\x00"
+
+class TaskID(IntEnum):
+    Echo = 0
+    Pull = 1
+    Push = 2
+
+class Data(IntEnum):
+    Ok = 0
+    Err = 1
+    Ctrl = 2
+    Echo = 3
+    Pull = 4
+    Push = 5
+
+class Ctrl(IntEnum):
+    OpenStream = 0
+    CloseStream = 1
+
+class Echo(IntEnum):
+    Data = 0
+
+class Pull(IntEnum):
+    Path = 0
+    Data = 1
+
+
+class Enum:
+    def __init__(self, variant: int, data):
+        self.variant = variant
+        self.data = data
+
+    def __bytes__(self):
+        packet = self.variant.to_bytes(4, "little")
+        packet += bytes(self.data)
+        return packet
+    
+    @staticmethod
+    def from_bytes(raw_bytes: bytes) -> "Enum":
+        variant = int.from_bytes(raw_bytes[0:4], "little")
+        data = raw_bytes[4:] 
+        return Enum(
+            variant,
+            data
+        )
+    
+    def __repr__(self):
+        return f"Enum(var: {self.variant!s}, data: {self.data})"
+
+class Packet:
+    def __init__(self, id: int, data):
+        self.id = id
+        self.data = data
+
+    def __bytes__(self):
+        packet = self.id.to_bytes(4, "little")
+        packet += bytes(self.data)
+        return packet
+    
+    @staticmethod
+    def from_bytes(raw_bytes: bytes) -> "Packet":
+        id = int.from_bytes(raw_bytes[0:4], "little")
+        data = raw_bytes[4:]
+        return Packet(
+            id,
+            data
+        )
+    
+    def __repr__(self):
+        return f"Packet(id: {self.id}, data: {self.data})"
+
+class Nybble:
+    def __init__(self):
+        self.dev = usb.core.find(idVendor=0xabcd, idProduct=0x1234)
+        if self.dev is None:
+            raise RuntimeError("nybble not found")
+
+        self.cfg = self.dev.get_active_configuration()
+        self.intf = self.cfg[(0,0)]
+        self.ep_out = self.intf[0]
+        self.ep_in = self.intf[1]
+
+    def write(self, data: bytes):
+        self.ep_out.write(data)
+
+    def read(self) -> bytes:
+        return bytes(self.ep_in.read(self.ep_in.wMaxPacketSize))
+        
+    def send(self, packet: Packet):
+        self.write(bytes(packet))
+
+    def recv(self) -> Packet:
+        return Packet.from_bytes(self.read())
+    
+    def open_stream(self, task_id: TaskID) -> int:
+        task_id = task_id.to_bytes(4, "little")
+        open_stream = Enum(Ctrl.OpenStream, task_id)
+        data = Enum(Data.Ctrl, open_stream)
+        packet = Packet(0, data)
+        self.send(bytes(packet))
+        resp = self.recv()
+        resp_data = Enum.from_bytes(resp.data)
+        resp_steam = Enum.from_bytes(resp_data.data)
+        stream_num = int.from_bytes(resp_steam.data, "little")
+        return stream_num
+
+
+@click.group()
+def ndb():
+    pass
+
+
+@ndb.command()
+@click.argument("string", type=str)
+def echo(string: str):
+    nyb = Nybble()
+    echo_steam = nyb.open_stream(TaskID.Echo)
+    raw_data = len(string.encode()).to_bytes(8, "little")
+    raw_data += string.encode()
+    echo_data = Enum(Echo.Data, raw_data)
+    data = Enum(Data.Echo, echo_data)
+    packet = Packet(echo_steam, data)
+    nyb.send(packet)
+    resp = nyb.recv()
+    resp_data = Enum.from_bytes(resp.data)
+    resp_echo = Enum.from_bytes(resp_data.data)
+    raw_resp_data = resp_echo.data
+    strlen = raw_resp_data[:8]
+    resp_string = raw_resp_data[8:]
+    print(resp_string.decode())
+
+
+@ndb.command()
+@click.argument("src", type=str)
+@click.argument("dst", type=click.Path(path_type=Path, dir_okay=False, writable=True))
+def pull(src: str, dst: Path):
+    nyb = Nybble()
+    pull_stream = nyb.open_stream(TaskID.Pull)
+    raw_path = len(src.encode()).to_bytes(8, "little")
+    raw_path += src.encode()
+    pull_data = Enum(Pull.Path, raw_path)
+    data = Enum(Data.Pull, pull_data)
+    packet = Packet(pull_stream, data)
+    nyb.send(packet)
+    resp = nyb.recv()
+    if resp.data != OK:
+        print(data)
+    else:
+        with open(dst, "wb") as file:
+            while True:
+                resp = nyb.recv()
+                if resp.data == OK:
+                    break
+
+                resp_data = Enum.from_bytes(resp.data)
+                resp_pull = Enum.from_bytes(resp_data.data)
+                raw_resp_data = resp_pull.data
+                data_len = raw_resp_data[:8]
+                resp_data = raw_resp_data[8:]
+                print(resp_data)
+                file.write(resp_data)
+
+                data = Enum(Data.Ok, b"")
+                packet = Packet(pull_stream, data)
+                nyb.send(packet)
+
+
+@ndb.command()
+@click.argument("src", type=click.Path(path_type=Path, dir_okay=False, readable=True, exists=True))
+@click.argument("dst", type=str)
+def push(src: Path, dst: str):
+    nyb = Nybble()
+    stream = nyb.open_stream(PUSH)
+    packet = bytes()
+    packet += 0x02.to_bytes(4, "little")
+    packet += len(dst).to_bytes(8, "little")
+    packet += dst.encode()
+    nyb.send(stream, packet)
+    id, data = nyb.recv()
+    if data != OK:
+        print(data)
+    else:
+        with open(src, "rb") as file:
+            while data := file.read(400):
+                packet = 0x03.to_bytes(4, "little")
+                packet += len(data).to_bytes(8, "little")
+                packet += data
+                nyb.send(stream, packet)
+                id, data = nyb.recv()
+                if data != OK:
+                    raise Exception(data)
+        packet = 0x00.to_bytes(4, "little")
+        nyb.send(stream, packet)
+
+@ndb.command()
+def stress():
+    nyb = Nybble()
+    data = bytes([i%256 for i in range(450)])
+    count = 1000
+    start = time.time()
+    for _ in range (count):
+        echo_steam = nyb.open_stream(0)
+        nyb.send(echo_steam, data)
+        _, response = nyb.recv()
+        assert response == data
+    end = time.time()
+    average = (end-start) / count
+    print(f"AVG: {average}")
+
+@ndb.group()
+def debug():
+    pass
+
+@debug.command()
+@click.argument("id", type=int)
+@click.argument("data", type=str, nargs=-1)
+def send(id: int, data: tuple[str]):
+    nyb = Nybble()
+    data = bytes([int(num) for num in data])
+    nyb.send(Packet(id, data))
+
+@debug.command()
+def recv():
+    nyb = Nybble()
+    packet = nyb.recv()
+    print(f"{packet.id}: {packet.data}")
+
+@debug.command()
+@click.argument("data", type=str, nargs=-1)
+def write(data: tuple[str]):
+    print(data)
+    nyb = Nybble()
+    data = bytes([int(num) for num in data])
+    nyb.write(data)
+
+@debug.command()
+def read():
+    nyb = Nybble()
+    data = nyb.read()
+    print(data)
+
+
+
+
+if __name__ == "__main__":
+    ndb()
+

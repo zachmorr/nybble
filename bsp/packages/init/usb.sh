@@ -35,4 +35,8 @@ mkdir ffs-usb
 mount -t functionfs usb /nybble/devices/ffs-usb
 cd ffs-usb
 
-# echo "musb-hdrc.1.auto" > $configfs/usb_gadget/$gadget/UDC
+RUST_LOG=trace usb ./ &
+# usb ./ &
+
+sleep 1
+echo "musb-hdrc.1.auto" > $configfs/usb_gadget/$gadget/UDC

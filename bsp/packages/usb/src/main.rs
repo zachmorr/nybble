@@ -1,304 +1,256 @@
+#[allow(unused)]
+mod ndb;
+mod usb;
+mod services;
 
-use std::fs;
+use anyhow::{anyhow, Context, Result, Error};
+use bincode::Options;
+use log::{debug, trace, warn, error};
+use std::collections::HashMap;
 use std::env;
-use std::io::Write;
-use log::debug;
-use std::ffi::CString;
+use std::io::{Read, Write};
 use std::path::Path;
+use std::sync::Arc;
+use tokio::sync::{RwLock, mpsc};
+use tokio::task::spawn_blocking;
+use usb::Function;
+use ndb::{CtrlData, Data, Packet};
+use std::pin::Pin;
+use std::future::Future;
 
-const FUNCTIONFS_STRINGS_MAGIC: u32 = 2;
-const FUNCTIONFS_DESCRIPTORS_MAGIC_V2: u32 = 3;
-const INTERFACE_BDESCRIPTOR_TYPE: u8 = 0x04;
-const ENDPOINT_BDESCRIPTOR_TYPE: u8 = 0x05;
+pub type StreamID = u32;
+pub type StreamMap = Arc<RwLock<HashMap<StreamID, mpsc::Sender<Data>>>>;
 
-#[derive(Debug)]
-enum USBError {
-    EndpointAddressSize,
-}
-
-#[repr(u8)]
-#[derive(PartialEq)]
-enum Direction {
-    In = 0x80,
-    Out = 0x00,
-}
-
-#[repr(u8)]
-enum TransferType {
-    Control = 0,
-    Isochronous = 1,
-    Bulk = 2,
-    Interrupt = 3,
-}
-
-enum Speed {
-    Full,
-    High,
-    Super,
-}
-
-mod FunctionFSFlags {
-    pub const FUNCTIONFS_HAS_FS_DESC: u32 = 1;
-	pub const FUNCTIONFS_HAS_HS_DESC: u32 = 2;
-	pub const FUNCTIONFS_HAS_SS_DESC: u32 = 4;
-	pub const FUNCTIONFS_HAS_MS_OS_DESC: u32 = 8;
-	pub const FUNCTIONFS_VIRTUAL_ADDR: u32 = 16;
-	pub const FUNCTIONFS_EVENTFD: u32 = 32;
-	pub const FUNCTIONFS_ALL_CTRL_RECIP: u32 = 64;
-	pub const FUNCTIONFS_CONFIG0_SETUP: u32 = 128;
-}
-
-trait Descriptor {
-    fn descriptor_type(&self) -> u8;
-    fn payload(&self) -> Vec<u8>;
-    fn descriptor(&self) -> Vec<u8> {
-        let mut bytes: Vec<u8> = self.payload();
-        let descriptor_size: u8 = u8::try_from(bytes.len()).expect("Unable to convert descriptor size into u8") + 2;
-        bytes.insert(0, self.descriptor_type());
-        bytes.insert(0, descriptor_size);
-        bytes
-    }
-}
-
-#[derive(Debug)]
-struct Interface {
-    number: u8,
-    alternate: u8,
-    num_endpoints: u8,
-    class: u8,
-    subclass: u8,
-    protocol: u8,
-    string_index: u8,
-    endpoints: Vec<Endpoint>,
-}
-
-impl Interface {
-    fn new(class: u8, subclass: u8, protocol: u8) -> Self {
-        Interface {
-            number: 0,
-            alternate: 0,
-            num_endpoints: 0,
-            class: class,
-            subclass: subclass,
-            protocol: protocol,
-            string_index: 0,
-            endpoints: Vec::new(),
-        }
-    }
-
-    fn add_endpoint(&mut self, mut endpoint: Endpoint) -> Result<(), USBError> {
-        if self.endpoints.len() >= 16 {
-            return Err(USBError::EndpointAddressSize)
-        }
-        let ep_count: u8 = self.endpoints.len() as u8;
-        endpoint.set_address(ep_count + 1).unwrap();
-        self.endpoints.push(endpoint);
-        self.num_endpoints += 1;
-        Ok(())
-    }
-}
-
-impl Descriptor for Interface {
-    fn descriptor_type(&self) -> u8 {
-        INTERFACE_BDESCRIPTOR_TYPE
-    }
-
-    fn payload(&self) -> Vec<u8> {
-        let mut payload = vec![self.number];
-        payload.push(self.alternate);
-        payload.push(self.num_endpoints);
-        payload.push(self.class);
-        payload.push(self.subclass);
-        payload.push(self.protocol);
-        payload.push(self.string_index);
-        payload
-    }
-}
-
-
-#[derive(Debug)]
-struct Endpoint {
-    address: u8,
-    attributes: u8,
-    max_packet_size: u16,
-    interval: u8
-}
-
-impl Endpoint {
-    fn new(direction: Direction, transfer_type: TransferType) -> Self {
-        let endpoint = Endpoint {
-            address: direction as u8,
-            attributes: transfer_type as u8,
-            max_packet_size: 0,
-            interval: 1,
-        };
-
-        endpoint
-    }
-
-    fn set_address(&mut self, addr: u8) -> Result<(), USBError> {
-        if addr >= 16{
-            return Err(USBError::EndpointAddressSize)
-        }
-        self.address |= addr;
-        Ok(())
-    }
-}
-
-impl Descriptor for Endpoint {
-    fn descriptor_type(&self) -> u8 {
-        ENDPOINT_BDESCRIPTOR_TYPE
-    }
-
-    fn payload(&self) -> Vec<u8> {
-        let mut payload = vec![self.address];
-        payload.push(self.attributes);
-        payload.extend(self.max_packet_size.to_le_bytes());
-        payload.push(self.interval);
-        payload
-    }
-}
-
-struct Function {
-    flags: u32,
-    fs_interfaces: Vec<Interface>,
-    hs_interfaces: Vec<Interface>,
-    ss_interfaces: Vec<Interface>,
-    ms_os_interfaces: Vec<Interface>,
-    strings: Vec<CString>,
-}
-
-impl Function {
-    fn new() -> Self {
-        Function {
-            flags: 0,
-            fs_interfaces: Vec::new(),
-            hs_interfaces: Vec::new(),
-            ss_interfaces: Vec::new(),
-            ms_os_interfaces: Vec::new(),
-            strings: Vec::new(),
-        }
-    }
-
-    fn add_string(&mut self, string: &str) -> u8 {
-        self.strings.push(
-            CString::new(string).expect("Cannot convert into C string")
-        );
-
-        let string_index: u8 = self.strings.len().try_into().expect("There's more that 255 strings?");
-        string_index
-    }
-
-    fn add_fs_interface(&mut self, mut interface: Interface, name: &str){
-        let string_index = self.add_string(name);
-        interface.string_index = string_index;
-
-        let fs_desc_count: u8 = self.fs_interfaces.len().try_into().expect("Unable to add >255 interfaces");
-        interface.number = fs_desc_count;
-        interface.alternate = 0;
-
-        self.fs_interfaces.push(interface);
-        self.flags |= FunctionFSFlags::FUNCTIONFS_HAS_FS_DESC;
-    }
-
-    fn ffs_descriptors(&self) -> Vec<u8> {
-        let mut header: Vec<u8> = Vec::new();
-        let mut descriptors: Vec<u8> = Vec::new();
-    
-        if self.flags & FunctionFSFlags::FUNCTIONFS_HAS_FS_DESC != 0 {
-            let mut fs_descriptor_count: u32 = 0;
-            for interface in self.fs_interfaces.iter() {
-                descriptors.extend(interface.descriptor());
-                fs_descriptor_count += 1;
-
-                for endpoint in interface.endpoints.iter() {
-                    descriptors.extend(endpoint.descriptor());
-                   fs_descriptor_count += 1;
-                }   
-            }
-            header.extend(fs_descriptor_count.to_le_bytes());
-        }
-
-        descriptors.splice(0..0, header);
-        descriptors.splice(0..0, self.flags.to_le_bytes());
-
-        let descriptors_len: u32 = descriptors.len().try_into().expect("descriptors packet size cannot fit into u32");
-        descriptors.splice(0..0, (descriptors_len + 8).to_le_bytes());
-        descriptors.splice(0..0, FUNCTIONFS_DESCRIPTORS_MAGIC_V2.to_le_bytes());
-        descriptors
-    }
-    
-    fn string_descriptors(&self) -> Vec<u8> {
-        let mut string_data: Vec<u8> = Vec::new();
-
-        for string in self.strings.iter() {
-            let lang_code: u16 = 0x0409;
-            string_data.extend(lang_code.to_le_bytes());
-            string_data.extend(string.as_bytes_with_nul());
-        }
-
-        
-        let str_count: u32 = self.strings.len().try_into().expect("string number cannot fit into u32");
-        let data_len: u32 = string_data.len().try_into().expect("string descriptor size cannot fit into u32");
-        let mut descriptors: Vec<u8> = Vec::new();
-        descriptors.extend(FUNCTIONFS_STRINGS_MAGIC.to_le_bytes());
-        descriptors.extend((data_len + 16).to_le_bytes());
-        descriptors.extend(str_count.to_le_bytes());
-        descriptors.extend(1u32.to_le_bytes());
-        descriptors.extend(string_data);
-        descriptors
-    }
-}
-
-fn main() {
-    env_logger::init();
+#[tokio::main]
+async fn main() -> Result<()> {
+    env_logger::builder().format_timestamp(None).init();
     let args: Vec<String> = env::args().collect();
-    let ep0_arg = args.get(1).expect("Not enoug h arguments!");
-    let ep0_path = Path::new(ep0_arg);
+    let ffs_dir_arg = args.get(1).expect("Not enough arguments!");
+    let ffs_dir = Path::new(ffs_dir_arg);
 
-    if !ep0_path.exists() {
-        println!("{} does not exist!", ep0_path.display());
-        std::process::exit(1);
-    }
+    let mut function = Function::new(ffs_dir)
+        .context(format!("opening function at {}", ffs_dir.display()))?;
 
-    let ep_in = Endpoint::new(Direction::In, TransferType::Bulk);
-    let ep_out = Endpoint::new(Direction::Out, TransferType::Bulk);
+    function
+        .write_descriptors()
+        .context(format!("writing descriptors"))?;
 
-    let mut interface = Interface::new(255, 1, 2);
-    interface.add_endpoint(ep_out).unwrap();
-    interface.add_endpoint(ep_in).unwrap();
+    let (writer, reader) = function
+        .open_endpoints()
+        .context("opening endpoints")?;
 
-    let mut function = Function::new();
-    function.add_fs_interface(interface, "custom interface?");
-    let ffs_descriptors = function.ffs_descriptors();
-    let string_descriptors = function.string_descriptors();
-    
-    let mut ep0 = fs::File::options().read(true).write(true).open(ep0_path).unwrap();
-    
+    // Start reader
+    let (reader_tx, mut reader_rx) = mpsc::channel(10);
+    spawn_blocking(|| {
+        if let Err(err) = reader_thread(reader, reader_tx) {
+            error!(target: "main", "reader thread died with {err}");
+        }
+    });
 
-    let ffs_descriptors: [u8; 39] = [
-        0x03, 0, 0, 0, 
-        0x27, 0, 0, 0, 
-        0x01, 0, 0, 0, 
-        0x03, 0, 0, 0, 
-        9, 4, 0, 0, 2, 0xff, 1, 2, 1, 
-        7, 5, 1, 2, 0, 0, 1, 
-        7, 5, 0x82, 2, 0, 0, 0, 
-    ];
-    debug!("Writing FFS descriptors: {:X?}", ffs_descriptors);
-    ep0.write(&ffs_descriptors).expect("Failed to write ffs descriptors");
+    // Start writer
+    let (writer_tx, writer_rx) = mpsc::channel(10);
+    spawn_blocking(|| {
+        if let Err(err) = writer_thread(writer, writer_rx) {
+            error!(target: "main", "writer thread died with {err}");
+        }
+    });
 
-    let string_descriptors: [u8; 35] = [
-        0x2, 0x0, 0x0, 0x0, 
-        0x23, 0x0, 0x0, 0, 
-        1, 0, 0, 0, 
-        1, 0, 0, 0, 
-        9, 4, 
-        0x63, 0x75, 0x73, 0x74, 0x6f, 0x6d, 0x20, 0x69, 0x6e, 0x74, 0x65, 0x72, 0x66, 0x61, 0x63, 0x65, 0
-    ];
-    debug!("Writing string descriptors: {:X?}", string_descriptors);
-    ep0.write(&string_descriptors).expect("Failed to write string descriptors");
+    // Start event listener 
+    spawn_blocking(move || {
+        loop {
+            debug!(target: "event", "{:?}", function.event());
+        }
+    });
 
+    // Start packet multiplexer
+    let task_map: StreamMap = Arc::new(RwLock::new(HashMap::new()));
     loop {
+        let packet = reader_rx.recv().await
+            .ok_or_else(|| anyhow!("channel was closed!"))?;
+        trace!(target: "main", "recv {:?}", packet);
+
+        if packet.id == 0 { // Handle control packet
+            let writer_clone = writer_tx.clone();
+            let task_map_clone = task_map.clone();
+
+            tokio::spawn(async move {
+                if let Err(err) = handle_ctrl_packet(
+                    packet.data,
+                    task_map_clone,
+                    &writer_clone
+                ).await.context("handling control packet") {
+                    let err_data = Data::Err(format!("{err:#}"));
+                    let err_packet = Packet {
+                        id: 0,
+                        data: err_data
+                    };
+                    let _res = writer_clone.send(err_packet).await;    
+                };
+            });
+        } else { // Forward packet
+            let id = packet.id;
+            match task_map.read().await.get(&id) {
+                Some(tx) => {
+                    debug!(target: "main", "forwarding to {id}");
+                    tx.send(packet.data).await
+                        .context(format!("failed to send packet to {id}"))?;
+                }
+                None => {
+                    warn!(target: "main", "stream {id} not open, dropping");
+                }
+            }
+        }
+    }
+}
+
+
+
+async fn handle_ctrl_packet(
+    data: Data,
+    task_map: StreamMap,
+    writer: &mpsc::Sender<Packet>,
+) -> Result<()> {
+    match data {
+        Data::Ctrl(CtrlData::OpenStream(task_id)) => {
+            open_stream(task_id, &task_map, &writer).await?;
+        },
+        command => {
+            return Err(anyhow!(format!("unknown command {:?}", command)));
+        }
+    }
+    Ok(())
+}
+
+async fn open_stream(
+    task_id: u32,
+    task_map: &StreamMap,
+    writer: &mpsc::Sender<Packet>,
+) -> Result<()> {
+    let stream_id = find_available_stream_id(&task_map).await?;
+
+    debug!(target: "ctrl", "creating stream {stream_id} channel to {task_id}");
+    let (tx, task_channel) = services::Channel::new(stream_id, &writer);
+    let task: Pin<Box<dyn Future<Output = Result<(), Error>> + Send>> = match task_id {
+        0 => Box::pin(services::echo_task(task_channel)),
+        1 => Box::pin(services::pull_task(task_channel)),
+        2 => Box::pin(services::push_task(task_channel)),
+        _ => {
+            let err = format!("unknown task num {task_id}");
+            warn!(target: "ctrl", "{err}");
+            ctrl_send(&writer, Data::Err(err)).await?;
+            return Ok(());
+        }
+    };
+
+    task_map.write().await.insert(stream_id, tx);
+    let task_map_clone = task_map.clone();
+    let writer_clone = writer.clone();
+    tokio::spawn(async move {
+        if let Err(err) = task.await {
+            warn!(target: "ctrl", "task {stream_id} error: {err}");
+            let err_data = Data::Err(format!("{err:#}"));
+            let err_packet = Packet {
+                id: stream_id,
+                data: err_data
+            };
+            let _res = writer_clone.send(err_packet).await;            
+        };
+        debug!("removing stream {} from map", stream_id);
+        task_map_clone.write().await.remove(&stream_id);
+    });
+
+    let response = Data::Ctrl(CtrlData::OpenStream(stream_id));
+    ctrl_send(&writer, response).await?;
+    Ok(())
+}
+
+async fn ctrl_send(
+    writer: &mpsc::Sender<Packet>,
+    data: Data,
+) -> Result<()> {
+    writer
+        .send(Packet {
+            id: 0,
+            data: data,
+        })
+        .await?;
+    Ok(())
+}
+
+async fn find_available_stream_id(task_map: &StreamMap) -> Result<u32> {
+    let task_map_guard = task_map.read().await;
+    (100..=u32::MAX)
+        .find(|n| !task_map_guard.contains_key(&n))
+        .ok_or_else(|| anyhow!("no stream IDs available?!?"))
+}
+
+
+fn reader_thread(
+    mut reader: std::fs::File,
+    channel: mpsc::Sender<Packet>,
+) -> Result<()> {
+    let options = bincode::DefaultOptions::new()
+        .with_no_limit()
+        .with_fixint_encoding()
+        .with_little_endian()
+        .allow_trailing_bytes();
+
+    let mut raw_bytes = Vec::new();
+    loop {
+        let mut buf = [0; 512];
+        let n = reader.read(&mut buf)?;
+        raw_bytes.extend_from_slice(&buf[..n]);
+        trace!(target: "reader", "buffer {:?}", &raw_bytes);
+
+        loop {
+            match options.deserialize(&raw_bytes) {
+                Ok(packet) => {
+                    trace!(target: "reader", "read {packet:?}");
+                    let consumed_bytes = options.serialized_size(&packet)?;
+                    raw_bytes = raw_bytes.split_off(consumed_bytes as usize);
+                    channel.blocking_send(packet)?;
+                },
+                Err(err) => {
+                    match *err {
+                        bincode::ErrorKind::Io(_) => {},
+                        _ => {
+                            warn!(target: "reader", "dropping packet: {err:#}");
+                            raw_bytes = Vec::new();
+                        },
+                    }
+                    break;
+                },
+            }
+        }
+    }
+}
+
+
+fn writer_thread(
+    mut writer: std::fs::File,
+    mut channel: mpsc::Receiver<Packet>,
+) -> Result<()> {
+    let options = bincode::DefaultOptions::new()
+        .with_no_limit()
+        .with_fixint_encoding()
+        .with_little_endian()
+        .reject_trailing_bytes();
+    
+    loop {
+        let packet = channel.blocking_recv()
+            .ok_or_else(|| anyhow!("channel was closed!"))?;
+
+        trace!(target: "writer", "writing {packet:?}");
+        let raw_bytes = match options.serialize(&packet) {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                warn!("dropping packet, serialization error {err:#}");
+                continue;
+            }
+        };
+        if let Err(err) = writer.write_all(&raw_bytes) {
+            warn!("write error {err:#}");
+            continue;
+        }
     }
 }
