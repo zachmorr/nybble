@@ -1,6 +1,6 @@
-config BR2_GADGET
-    bool "gadget"
+config BR2_NYB
+    bool "nyb"
     depends on BR2_PACKAGE_HOST_RUSTC_TARGET_ARCH_SUPPORTS
     select BR2_PACKAGE_HOST_RUSTC
     help
-      USB Gadget
+      nyb

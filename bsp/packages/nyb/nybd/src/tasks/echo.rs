@@ -1,14 +1,12 @@
 use super::Channel;
-use anyhow::Result;
 use log::{debug, trace};
-use crate::ndb::Data;
+use libnyb::{Echo, EchoError};
 
-
-pub async fn echo_task(mut channel: Channel) -> Result<()> {
+pub async fn echo_task(mut channel: Channel) -> Result<(), EchoError> {
     debug!(target: "echo", "starting");
-    let packet: Data = channel.recv().await?;
+    let packet: Echo = channel.recv().await;
     trace!(target: "echo", "echoing {:?}", packet);
-    channel.send(packet).await?;
+    channel.send(packet).await;
     debug!(target: "echo", "ending");
     Ok(())
 }

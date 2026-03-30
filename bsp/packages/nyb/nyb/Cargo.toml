@@ -1,0 +1,19 @@
+[package]
+name = "nyb"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0.97"
+bincode = "1.3.3"
+clap = { version = "4.5.35", features = ["derive"] }
+daemonize = "0.5.0"
+env_logger = "0.11.8"
+libc = "0.2.174"
+libnyb = { path = "../libnyb" }
+log = "0.4.27"
+rusb = "0.9.4"
+serde = "1.0.219"
+termios = "0.3.3"
+tokio = { version = "1.44.1", features = ["full"] }
+

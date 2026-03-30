@@ -32,6 +32,7 @@ mount -o loop $B/rootfs.ext4 $image
 
 cp $B/boot.scr $B/linux-nybble.dtb $B/zImage $boot
 cp -r $image/* $rootfs
+rm -r $rootfs/lost+found
 chown -R root:root $rootfs/*
 sync
 

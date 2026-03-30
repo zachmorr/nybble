@@ -1,7 +1,0 @@
-1) On bind event, open ep file descriptors 
-2) On unbind event close ep file descriptors
-3) On Enable event start read/write from ep files & start handlers
-4) On Disable event stop read/write from ep files & stop handlers
-5) On Suspend event pause handlers
-6) On Resume event resume handlers
-

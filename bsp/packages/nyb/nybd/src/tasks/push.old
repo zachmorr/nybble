@@ -1,9 +1,9 @@
 use std::io::Write;
 use super::Channel;
-use crate::ndb::PushData;
-use crate::ndb::Data;
+use libnyb::PushData;
+use libnyb::Data;
 use log::{debug, trace, warn};
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Result, anyhow, Context};
 
 
 pub async fn push_task(mut channel: Channel) -> Result<()> {
